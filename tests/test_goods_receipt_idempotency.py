@@ -258,7 +258,7 @@ def test_empty_goods_receipt_is_rejected_and_does_not_occupy_the_delivery_note()
 
 
 def test_repeat_of_registered_delivery_note_with_unknown_purchase_order_is_duplicate():
-    """已登记的送货单号再次提交时只看单号，即使采购订单不存在。"""
+    """已登记的送货单号再次登记时按重复单据拒绝，即使采购订单不存在。"""
     sandbox = new_sandbox()
     assert receive(sandbox, "k1", "DN-1", 6).accepted
 
