@@ -55,9 +55,19 @@ class OperationResult:
 
 
 @dataclass(frozen=True)
+class GoodsReceiptRequest:
+    """登记收货时提交的业务请求。轨迹保留它，库存仍按收货结果计算。"""
+
+    delivery_note_no: str
+    purchase_order_no: str
+    lines: tuple[ReceiptLine, ...]
+
+
+@dataclass(frozen=True)
 class TraceEntry:
     identity: Identity
     operation: str
+    request: GoodsReceiptRequest
     accepted: bool
     rejection: Rejection | None
     receipt_no: str | None
@@ -88,13 +98,14 @@ class Sandbox:
         lines: tuple[ReceiptLine, ...],
     ) -> OperationResult:
         request = ("register_goods_receipt", identity, delivery_note_no, purchase_order_no, lines)
+        submitted = GoodsReceiptRequest(delivery_note_no, purchase_order_no, lines)
         inventory_before = {material: quantity for material, quantity in self._inventory.items()}
         if idempotency_key in self._idempotency:
             bound_request, bound_result = self._idempotency[idempotency_key]
             if bound_request != request:
                 conflict = OperationResult(accepted=False, rejection=Rejection.IDEMPOTENCY_KEY_CONFLICT)
-                return self._record(identity, conflict, inventory_before)
-            return self._record(identity, replace(bound_result, replayed=True), inventory_before)
+                return self._record(identity, submitted, conflict, inventory_before)
+            return self._record(identity, submitted, replace(bound_result, replayed=True), inventory_before)
 
         if Role.RECEIVING_CLERK not in identity.roles:
             result = OperationResult(accepted=False, rejection=Rejection.ROLE_NOT_PERMITTED)
@@ -102,7 +113,7 @@ class Sandbox:
             result = self._register_goods_receipt(delivery_note_no, purchase_order_no, lines)
         # 幂等键绑定首次请求内容，无论成功还是被拒绝
         self._idempotency[idempotency_key] = (request, result)
-        return self._record(identity, result, inventory_before)
+        return self._record(identity, submitted, result, inventory_before)
 
     def _register_goods_receipt(
         self,
@@ -141,7 +152,13 @@ class Sandbox:
     def execution_trace(self) -> tuple[TraceEntry, ...]:
         return tuple(self._trace)
 
-    def _record(self, identity: Identity, result: OperationResult, inventory_before: dict[str, int]) -> OperationResult:
+    def _record(
+        self,
+        identity: Identity,
+        submitted: GoodsReceiptRequest,
+        result: OperationResult,
+        inventory_before: dict[str, int],
+    ) -> OperationResult:
         materials = set(inventory_before) | set(self._inventory)
         delta = tuple(
             (material, self._inventory.get(material, 0) - inventory_before.get(material, 0))
@@ -152,6 +169,7 @@ class Sandbox:
             TraceEntry(
                 identity=identity,
                 operation="register_goods_receipt",
+                request=submitted,
                 accepted=result.accepted,
                 rejection=result.rejection,
                 receipt_no=result.receipt_no,

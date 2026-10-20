@@ -54,6 +54,9 @@ def test_successful_goods_receipt_is_on_the_trace():
     assert entry.receipt_no == result.receipt_no
     assert entry.accepted
     assert entry.inventory_delta == (("M-1", 6),)
+    assert entry.request.delivery_note_no == "DN-1"
+    assert entry.request.purchase_order_no == "PO-1"
+    assert entry.request.lines == (ReceiptLine(po_line_no=1, quantity=6),)
     assert sandbox.inventory_on_hand(CLERK, "M-1") == 6
 
 
@@ -66,6 +69,9 @@ def test_rejected_goods_receipt_is_on_the_trace_without_inventory_change():
     assert rejected.rejection is Rejection.OVER_RECEIPT
     assert entry.rejection is Rejection.OVER_RECEIPT
     assert entry.inventory_delta == ()
+    assert entry.request.delivery_note_no == "DN-1"
+    assert entry.request.purchase_order_no == "PO-1"
+    assert entry.request.lines == (ReceiptLine(po_line_no=1, quantity=12),)
     assert sandbox.inventory_on_hand(CLERK, "M-1") == 0
 
 
@@ -82,6 +88,8 @@ def test_idempotent_replay_is_a_separate_trace_entry_and_does_not_increase_inven
     assert trace[1].replayed
     assert trace[1].receipt_no == first.receipt_no
     assert trace[1].inventory_delta == ()
+    assert trace[1].request == trace[0].request
+    assert trace[1].request.lines == (ReceiptLine(po_line_no=1, quantity=6),)
     assert sandbox.inventory_on_hand(CLERK, "M-1") == 6
 
 
