@@ -282,20 +282,20 @@ class Sandbox:
         invoice_no: str,
         lines: tuple[SupplierInvoiceLine, ...],
     ) -> OperationResult:
-        request = ("enter_supplier_invoice", identity, supplier, invoice_no, lines)
+        request = ("enter_invoice", identity, supplier, invoice_no, lines)
         submitted = SupplierInvoiceRequest(supplier, invoice_no, lines)
         inventory_before = {material: quantity for material, quantity in self._inventory.items()}
         if idempotency_key in self._idempotency:
             bound_request, bound_result = self._idempotency[idempotency_key]
             if bound_request != request:
                 conflict = OperationResult(accepted=False, rejection=Rejection.IDEMPOTENCY_KEY_CONFLICT)
-                return self._record(identity, submitted, conflict, inventory_before, "enter_supplier_invoice")
+                return self._record(identity, submitted, conflict, inventory_before, "enter_invoice")
             return self._record(
                 identity,
                 submitted,
                 replace(bound_result, replayed=True),
                 inventory_before,
-                "enter_supplier_invoice",
+                "enter_invoice",
             )
 
         # 第一期不另加「收货员不得录入发票」。没有角色才拒绝。
@@ -304,7 +304,7 @@ class Sandbox:
         else:
             result = self._enter_new_supplier_invoice(supplier, invoice_no, lines)
         self._idempotency[idempotency_key] = (request, result)
-        return self._record(identity, submitted, result, inventory_before, "enter_supplier_invoice")
+        return self._record(identity, submitted, result, inventory_before, "enter_invoice")
 
     def _enter_new_supplier_invoice(
         self,

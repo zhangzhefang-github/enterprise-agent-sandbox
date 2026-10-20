@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from enterprise_agent_sandbox import (
+    BusinessOperation,
     Identity,
     PurchaseOrder,
     PurchaseOrderLine,
@@ -61,7 +62,7 @@ def test_entered_invoice_can_be_read_and_creates_no_payable():
     assert sandbox.inventory_on_hand(ACCOUNTANT, "M-1") == 0
     trace = sandbox.execution_trace()
     assert len(trace) == 1
-    assert trace[0].operation == "enter_supplier_invoice"
+    assert trace[0].operation == BusinessOperation.ENTER_INVOICE.value
     assert trace[0].accepted and trace[0].inventory_delta == ()
     assert trace[0].request.invoice_no == "INV-1"
     assert trace[0].request.lines[0].quantity == 6
@@ -74,6 +75,10 @@ def test_same_supplier_and_invoice_number_cannot_be_entered_twice():
     second = enter(sandbox, "k2")
 
     assert second.rejection is Rejection.DUPLICATE_DOCUMENT
+    assert [entry.operation for entry in sandbox.execution_trace()] == [
+        BusinessOperation.ENTER_INVOICE.value,
+        BusinessOperation.ENTER_INVOICE.value,
+    ]
     assert len(sandbox.supplier_invoices(ACCOUNTANT)) == 1
     assert sandbox.payables(ACCOUNTANT) == ()
     replay = enter(sandbox, "k1")
