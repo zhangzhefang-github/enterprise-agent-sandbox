@@ -10,6 +10,10 @@ class Role(Enum):
     AP_ACCOUNTANT = "ap_accountant"
 
 
+class LostGoodsReceiptResponse(Exception):
+    """登记收货已经成功，但这次调用没有拿到成功结果。"""
+
+
 class Rejection(Enum):
     IDEMPOTENCY_KEY_CONFLICT = "idempotency_key_conflict"
     DUPLICATE_DOCUMENT = "duplicate_document"
@@ -90,6 +94,8 @@ class Sandbox:
         self._trace: list[TraceEntry] = []
         # 并发登记按进入临界区的顺序整笔处理，避免检查和写入交错。
         self._serialization = threading.Lock()
+        # 默认关闭。只让下一次本来会成功的新登记对调用方表现为响应丢失。
+        self._lose_next_successful_goods_receipt = False
 
     def register_goods_receipt(
         self,
@@ -134,7 +140,15 @@ class Sandbox:
             result = self._register_goods_receipt(delivery_note_no, purchase_order_no, lines)
         # 幂等键绑定首次请求内容，无论成功还是被拒绝
         self._idempotency[idempotency_key] = (request, result)
-        return self._record(identity, submitted, result, inventory_before)
+        recorded = self._record(identity, submitted, result, inventory_before)
+        if result.accepted and self._lose_next_successful_goods_receipt:
+            self._lose_next_successful_goods_receipt = False
+            raise LostGoodsReceiptResponse
+        return recorded
+
+    def declare_lost_goods_receipt_response(self) -> None:
+        with self._serialization:
+            self._lose_next_successful_goods_receipt = True
 
     def _register_goods_receipt(
         self,
