@@ -207,3 +207,51 @@ def test_delivery_note_with_one_over_received_line_registers_no_line():
     assert result.rejection is Rejection.OVER_RECEIPT
     assert sandbox.inventory_on_hand(CLERK, "M-1") == 0
     assert sandbox.inventory_on_hand(CLERK, "M-2") == 0
+
+
+def test_unknown_purchase_order_is_rejected_and_does_not_occupy_the_delivery_note():
+    sandbox = new_sandbox()
+
+    rejected = sandbox.register_goods_receipt(
+        CLERK,
+        idempotency_key="k1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-MISSING",
+        lines=(ReceiptLine(po_line_no=1, quantity=6),),
+    )
+
+    assert rejected.rejection is Rejection.UNKNOWN_PURCHASE_ORDER
+    assert sandbox.inventory_on_hand(CLERK, "M-1") == 0
+    assert receive(sandbox, "k2", "DN-1", 6).accepted
+
+
+def test_unknown_purchase_order_line_is_rejected_and_does_not_occupy_the_delivery_note():
+    sandbox = new_sandbox()
+
+    rejected = sandbox.register_goods_receipt(
+        CLERK,
+        idempotency_key="k1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-1",
+        lines=(ReceiptLine(po_line_no=1, quantity=4), ReceiptLine(po_line_no=9, quantity=1)),
+    )
+
+    assert rejected.rejection is Rejection.UNKNOWN_PURCHASE_ORDER_LINE
+    assert sandbox.inventory_on_hand(CLERK, "M-1") == 0
+    assert receive(sandbox, "k2", "DN-1", 6).accepted
+
+
+def test_empty_goods_receipt_is_rejected_and_does_not_occupy_the_delivery_note():
+    sandbox = new_sandbox()
+
+    rejected = sandbox.register_goods_receipt(
+        CLERK,
+        idempotency_key="k1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-1",
+        lines=(),
+    )
+
+    assert rejected.rejection is Rejection.EMPTY_GOODS_RECEIPT
+    assert sandbox.inventory_on_hand(CLERK, "M-1") == 0
+    assert receive(sandbox, "k2", "DN-1", 6).accepted

@@ -14,6 +14,9 @@ class Rejection(Enum):
     DUPLICATE_DOCUMENT = "duplicate_document"
     OVER_RECEIPT = "over_receipt"
     ROLE_NOT_PERMITTED = "role_not_permitted"
+    UNKNOWN_PURCHASE_ORDER = "unknown_purchase_order"
+    UNKNOWN_PURCHASE_ORDER_LINE = "unknown_purchase_order_line"
+    EMPTY_GOODS_RECEIPT = "empty_goods_receipt"
 
 
 @dataclass(frozen=True)
@@ -93,13 +96,19 @@ class Sandbox:
         purchase_order_no: str,
         lines: tuple[ReceiptLine, ...],
     ) -> OperationResult:
-        po = self._purchase_orders[purchase_order_no]
+        if not lines:
+            return OperationResult(accepted=False, rejection=Rejection.EMPTY_GOODS_RECEIPT)
+        po = self._purchase_orders.get(purchase_order_no)
+        if po is None:
+            return OperationResult(accepted=False, rejection=Rejection.UNKNOWN_PURCHASE_ORDER)
         if delivery_note_no in self._registered_delivery_notes:
             return OperationResult(accepted=False, rejection=Rejection.DUPLICATE_DOCUMENT)
 
         po_lines = {line.line_no: line for line in po.lines}
         quantity_by_line: dict[int, int] = defaultdict(int)
         for line in lines:
+            if line.po_line_no not in po_lines:
+                return OperationResult(accepted=False, rejection=Rejection.UNKNOWN_PURCHASE_ORDER_LINE)
             quantity_by_line[line.po_line_no] += line.quantity
         # 先核对全部行，任一行不合法则整体拒绝，不做部分登记或截断
         for po_line_no, quantity in quantity_by_line.items():
