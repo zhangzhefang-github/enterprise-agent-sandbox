@@ -96,13 +96,14 @@ class Sandbox:
         purchase_order_no: str,
         lines: tuple[ReceiptLine, ...],
     ) -> OperationResult:
+        # 已成功登记的送货单只看单号，先于采购订单是否存在
+        if delivery_note_no in self._registered_delivery_notes:
+            return OperationResult(accepted=False, rejection=Rejection.DUPLICATE_DOCUMENT)
         if not lines:
             return OperationResult(accepted=False, rejection=Rejection.EMPTY_GOODS_RECEIPT)
         po = self._purchase_orders.get(purchase_order_no)
         if po is None:
             return OperationResult(accepted=False, rejection=Rejection.UNKNOWN_PURCHASE_ORDER)
-        if delivery_note_no in self._registered_delivery_notes:
-            return OperationResult(accepted=False, rejection=Rejection.DUPLICATE_DOCUMENT)
 
         po_lines = {line.line_no: line for line in po.lines}
         quantity_by_line: dict[int, int] = defaultdict(int)
