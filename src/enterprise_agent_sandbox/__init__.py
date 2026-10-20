@@ -1,4 +1,14 @@
 from enterprise_agent_sandbox.reference_tools import ReferenceReceipt, ReferenceToolLayer
+from enterprise_agent_sandbox.task import (
+    BusinessOperation,
+    DeliveryNote,
+    DeliveryNoteLine,
+    EvaluationRun,
+    ExecutionBudget,
+    InvalidTaskDefinition,
+    P2P_RULE_SET_VERSION,
+    Task,
+)
 from enterprise_agent_sandbox.sandbox import (
     GoodsReceiptRequest,
     Identity,
@@ -14,9 +24,16 @@ from enterprise_agent_sandbox.sandbox import (
 )
 
 __all__ = [
+    "BusinessOperation",
+    "DeliveryNote",
+    "DeliveryNoteLine",
+    "EvaluationRun",
+    "ExecutionBudget",
     "GoodsReceiptRequest",
     "Identity",
+    "InvalidTaskDefinition",
     "LostGoodsReceiptResponse",
+    "P2P_RULE_SET_VERSION",
     "OperationResult",
     "PurchaseOrder",
     "PurchaseOrderLine",
@@ -26,5 +43,6 @@ __all__ = [
     "Rejection",
     "Role",
     "Sandbox",
+    "Task",
     "TraceEntry",
 ]
