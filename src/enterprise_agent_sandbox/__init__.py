@@ -2,6 +2,7 @@ from enterprise_agent_sandbox.reference_tools import ReferenceReceipt, Reference
 from enterprise_agent_sandbox.sandbox import (
     GoodsReceiptRequest,
     Identity,
+    LostGoodsReceiptResponse,
     OperationResult,
     PurchaseOrder,
     PurchaseOrderLine,
@@ -15,6 +16,7 @@ from enterprise_agent_sandbox.sandbox import (
 __all__ = [
     "GoodsReceiptRequest",
     "Identity",
+    "LostGoodsReceiptResponse",
     "OperationResult",
     "PurchaseOrder",
     "PurchaseOrderLine",
