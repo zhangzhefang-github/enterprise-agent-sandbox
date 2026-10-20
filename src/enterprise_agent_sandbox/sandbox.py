@@ -1,3 +1,4 @@
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -87,8 +88,28 @@ class Sandbox:
         # (采购订单号, 行号) -> 累计已收数量
         self._received: dict[tuple[str, int], int] = defaultdict(int)
         self._trace: list[TraceEntry] = []
+        # 并发登记按进入临界区的顺序整笔处理，避免检查和写入交错。
+        self._serialization = threading.Lock()
 
     def register_goods_receipt(
+        self,
+        identity: Identity,
+        *,
+        idempotency_key: str,
+        delivery_note_no: str,
+        purchase_order_no: str,
+        lines: tuple[ReceiptLine, ...],
+    ) -> OperationResult:
+        with self._serialization:
+            return self._register_goods_receipt_serialized(
+                identity,
+                idempotency_key=idempotency_key,
+                delivery_note_no=delivery_note_no,
+                purchase_order_no=purchase_order_no,
+                lines=lines,
+            )
+
+    def _register_goods_receipt_serialized(
         self,
         identity: Identity,
         *,
@@ -150,7 +171,8 @@ class Sandbox:
         return OperationResult(accepted=True, receipt_no=f"GR-{self._receipt_count}")
 
     def execution_trace(self) -> tuple[TraceEntry, ...]:
-        return tuple(self._trace)
+        with self._serialization:
+            return tuple(self._trace)
 
     def _record(
         self,
@@ -180,4 +202,5 @@ class Sandbox:
         return result
 
     def inventory_on_hand(self, identity: Identity, material: str) -> int:
-        return self._inventory[material]
+        with self._serialization:
+            return self._inventory[material]
