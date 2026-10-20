@@ -83,6 +83,20 @@ class SupplierInvoiceRequest:
 
 
 @dataclass(frozen=True)
+class BusinessQueryRequest:
+    """查询请求。轨迹只记录这次查询，不复制被查询的单据内容。"""
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    """查询的结构化结果。拒绝时 records 为空，不返回业务数据。"""
+
+    accepted: bool
+    rejection: Rejection | None = None
+    records: tuple = ()
+
+
+@dataclass(frozen=True)
 class OperationResult:
     accepted: bool
     rejection: Rejection | None = None
@@ -103,7 +117,7 @@ class GoodsReceiptRequest:
 class TraceEntry:
     identity: Identity
     operation: str
-    request: GoodsReceiptRequest | SupplierInvoiceRequest
+    request: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest
     accepted: bool
     rejection: Rejection | None
     receipt_no: str | None
@@ -230,7 +244,7 @@ class Sandbox:
     def _record(
         self,
         identity: Identity,
-        submitted: GoodsReceiptRequest | SupplierInvoiceRequest,
+        submitted: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest,
         result: OperationResult,
         inventory_before: dict[str, int],
         operation: str = "register_goods_receipt",
@@ -298,8 +312,8 @@ class Sandbox:
                 "enter_invoice",
             )
 
-        # 第一期不另加「收货员不得录入发票」。没有角色才拒绝。
-        if not identity.roles:
+        # 录入发票要求应付会计。仅有收货员或没有任何角色都拒绝。同时持有两个角色可以录入。
+        if Role.AP_ACCOUNTANT not in identity.roles:
             result = OperationResult(accepted=False, rejection=Rejection.ROLE_NOT_PERMITTED)
         else:
             result = self._enter_new_supplier_invoice(supplier, invoice_no, lines)
@@ -322,13 +336,28 @@ class Sandbox:
         )
         return OperationResult(accepted=True)
 
-    def supplier_invoices(self, identity: Identity) -> tuple[SupplierInvoice, ...]:
+    def supplier_invoices(self, identity: Identity) -> QueryResult:
         with self._serialization:
-            return tuple(self._supplier_invoices.values())
+            return self._query(identity, "query_invoice", tuple(self._supplier_invoices.values()))
 
-    def payables(self, identity: Identity) -> tuple[()]:
+    def payables(self, identity: Identity) -> QueryResult:
         with self._serialization:
-            return ()
+            return self._query(identity, "query_payable", ())
+
+    def _query(self, identity: Identity, operation: str, records: tuple) -> QueryResult:
+        inventory_before = {material: quantity for material, quantity in self._inventory.items()}
+        if Role.AP_ACCOUNTANT not in identity.roles:
+            result = QueryResult(accepted=False, rejection=Rejection.ROLE_NOT_PERMITTED)
+        else:
+            result = QueryResult(accepted=True, records=records)
+        self._record(
+            identity,
+            BusinessQueryRequest(),
+            OperationResult(accepted=result.accepted, rejection=result.rejection),
+            inventory_before,
+            operation,
+        )
+        return result
 
     def inventory_on_hand(self, identity: Identity, material: str) -> int:
         with self._serialization:

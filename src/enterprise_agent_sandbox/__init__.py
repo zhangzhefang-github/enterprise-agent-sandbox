@@ -10,7 +10,9 @@ from enterprise_agent_sandbox.task import (
     Task,
 )
 from enterprise_agent_sandbox.sandbox import (
+    BusinessQueryRequest,
     GoodsReceiptRequest,
+    QueryResult,
     Identity,
     LostGoodsReceiptResponse,
     OperationResult,
@@ -29,6 +31,7 @@ from enterprise_agent_sandbox.sandbox import (
 
 __all__ = [
     "BusinessOperation",
+    "BusinessQueryRequest",
     "DeliveryNote",
     "DeliveryNoteLine",
     "EvaluationRun",
@@ -40,6 +43,7 @@ __all__ = [
     "P2P_RULE_SET_VERSION",
     "OperationResult",
     "PurchaseOrder",
+    "QueryResult",
     "PurchaseOrderLine",
     "ReceiptLine",
     "ReferenceReceipt",
