@@ -1,5 +1,6 @@
 from enterprise_agent_sandbox.reference_tools import ReferenceReceipt, ReferenceToolLayer
 from enterprise_agent_sandbox.sandbox import (
+    GoodsReceiptRequest,
     Identity,
     OperationResult,
     PurchaseOrder,
@@ -8,9 +9,11 @@ from enterprise_agent_sandbox.sandbox import (
     Rejection,
     Role,
     Sandbox,
+    TraceEntry,
 )
 
 __all__ = [
+    "GoodsReceiptRequest",
     "Identity",
     "OperationResult",
     "PurchaseOrder",
@@ -21,4 +24,5 @@ __all__ = [
     "Rejection",
     "Role",
     "Sandbox",
+    "TraceEntry",
 ]

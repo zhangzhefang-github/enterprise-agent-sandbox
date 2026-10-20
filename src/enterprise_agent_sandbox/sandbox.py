@@ -54,6 +54,27 @@ class OperationResult:
     replayed: bool = False
 
 
+@dataclass(frozen=True)
+class GoodsReceiptRequest:
+    """登记收货时提交的业务请求。轨迹保留它，库存仍按收货结果计算。"""
+
+    delivery_note_no: str
+    purchase_order_no: str
+    lines: tuple[ReceiptLine, ...]
+
+
+@dataclass(frozen=True)
+class TraceEntry:
+    identity: Identity
+    operation: str
+    request: GoodsReceiptRequest
+    accepted: bool
+    rejection: Rejection | None
+    receipt_no: str | None
+    replayed: bool
+    inventory_delta: tuple[tuple[str, int], ...]
+
+
 class Sandbox:
     def __init__(self, purchase_orders: list[PurchaseOrder]):
         self._purchase_orders = {po.number: po for po in purchase_orders}
@@ -65,6 +86,7 @@ class Sandbox:
         self._registered_delivery_notes: set[str] = set()
         # (采购订单号, 行号) -> 累计已收数量
         self._received: dict[tuple[str, int], int] = defaultdict(int)
+        self._trace: list[TraceEntry] = []
 
     def register_goods_receipt(
         self,
@@ -76,11 +98,14 @@ class Sandbox:
         lines: tuple[ReceiptLine, ...],
     ) -> OperationResult:
         request = ("register_goods_receipt", identity, delivery_note_no, purchase_order_no, lines)
+        submitted = GoodsReceiptRequest(delivery_note_no, purchase_order_no, lines)
+        inventory_before = {material: quantity for material, quantity in self._inventory.items()}
         if idempotency_key in self._idempotency:
             bound_request, bound_result = self._idempotency[idempotency_key]
             if bound_request != request:
-                return OperationResult(accepted=False, rejection=Rejection.IDEMPOTENCY_KEY_CONFLICT)
-            return replace(bound_result, replayed=True)
+                conflict = OperationResult(accepted=False, rejection=Rejection.IDEMPOTENCY_KEY_CONFLICT)
+                return self._record(identity, submitted, conflict, inventory_before)
+            return self._record(identity, submitted, replace(bound_result, replayed=True), inventory_before)
 
         if Role.RECEIVING_CLERK not in identity.roles:
             result = OperationResult(accepted=False, rejection=Rejection.ROLE_NOT_PERMITTED)
@@ -88,7 +113,7 @@ class Sandbox:
             result = self._register_goods_receipt(delivery_note_no, purchase_order_no, lines)
         # 幂等键绑定首次请求内容，无论成功还是被拒绝
         self._idempotency[idempotency_key] = (request, result)
-        return result
+        return self._record(identity, submitted, result, inventory_before)
 
     def _register_goods_receipt(
         self,
@@ -123,6 +148,36 @@ class Sandbox:
         self._registered_delivery_notes.add(delivery_note_no)
         self._receipt_count += 1
         return OperationResult(accepted=True, receipt_no=f"GR-{self._receipt_count}")
+
+    def execution_trace(self) -> tuple[TraceEntry, ...]:
+        return tuple(self._trace)
+
+    def _record(
+        self,
+        identity: Identity,
+        submitted: GoodsReceiptRequest,
+        result: OperationResult,
+        inventory_before: dict[str, int],
+    ) -> OperationResult:
+        materials = set(inventory_before) | set(self._inventory)
+        delta = tuple(
+            (material, self._inventory.get(material, 0) - inventory_before.get(material, 0))
+            for material in sorted(materials)
+            if self._inventory.get(material, 0) != inventory_before.get(material, 0)
+        )
+        self._trace.append(
+            TraceEntry(
+                identity=identity,
+                operation="register_goods_receipt",
+                request=submitted,
+                accepted=result.accepted,
+                rejection=result.rejection,
+                receipt_no=result.receipt_no,
+                replayed=result.replayed,
+                inventory_delta=delta,
+            )
+        )
+        return result
 
     def inventory_on_hand(self, identity: Identity, material: str) -> int:
         return self._inventory[material]
