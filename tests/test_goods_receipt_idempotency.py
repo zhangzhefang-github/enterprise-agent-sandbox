@@ -75,6 +75,55 @@ def test_same_key_with_different_content_is_rejected():
     assert sandbox.inventory_on_hand(CLERK, "M-1") == 6
 
 
+def test_same_delivery_note_number_is_duplicate_for_another_supplier():
+    sandbox = Sandbox(
+        purchase_orders=[
+            PurchaseOrder(
+                number="PO-1",
+                supplier="SUP-1",
+                lines=(PurchaseOrderLine(1, "M-1", ordered_quantity=10, unit_price=Decimal("100.00")),),
+            ),
+            PurchaseOrder(
+                number="PO-2",
+                supplier="SUP-2",
+                lines=(PurchaseOrderLine(1, "M-2", ordered_quantity=10, unit_price=Decimal("50.00")),),
+            ),
+        ]
+    )
+
+    def receive_from(key: str, purchase_order_no: str):
+        return sandbox.register_goods_receipt(
+            CLERK,
+            idempotency_key=key,
+            delivery_note_no="DN-1",
+            purchase_order_no=purchase_order_no,
+            lines=(ReceiptLine(po_line_no=1, quantity=6),),
+        )
+
+    assert receive_from("k1", "PO-1").accepted
+    duplicate = receive_from("k2", "PO-2")
+
+    assert duplicate.rejection is Rejection.DUPLICATE_DOCUMENT
+    assert sandbox.inventory_on_hand(CLERK, "M-1") == 6
+    assert sandbox.inventory_on_hand(CLERK, "M-2") == 0
+
+
+def test_same_po_line_repeated_in_one_request_is_rejected_as_a_whole():
+    sandbox = new_sandbox()
+
+    result = sandbox.register_goods_receipt(
+        CLERK,
+        idempotency_key="k1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-1",
+        lines=(ReceiptLine(po_line_no=1, quantity=6), ReceiptLine(po_line_no=1, quantity=6)),
+    )
+
+    assert result.rejection is Rejection.OVER_RECEIPT
+    assert sandbox.inventory_on_hand(CLERK, "M-1") == 0
+    assert receive(sandbox, "k2", "DN-1", 10).accepted
+
+
 def test_new_key_for_already_registered_delivery_note_is_duplicate_document():
     sandbox = new_sandbox()
     receive(sandbox, "k1", "DN-1", 6)

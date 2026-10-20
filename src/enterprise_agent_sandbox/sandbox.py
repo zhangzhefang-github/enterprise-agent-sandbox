@@ -58,8 +58,8 @@ class Sandbox:
         # 幂等键 -> (首次请求内容, 首次结果)
         self._idempotency: dict[str, tuple[tuple, OperationResult]] = {}
         self._receipt_count = 0
-        # 已成功登记的送货单：(供应商, 送货单号)
-        self._registered_delivery_notes: set[tuple[str, str]] = set()
+        # 已成功登记的送货单号。重复单据只看送货单号，不看供应商。
+        self._registered_delivery_notes: set[str] = set()
         # (采购订单号, 行号) -> 累计已收数量
         self._received: dict[tuple[str, int], int] = defaultdict(int)
 
@@ -94,24 +94,23 @@ class Sandbox:
         lines: tuple[ReceiptLine, ...],
     ) -> OperationResult:
         po = self._purchase_orders[purchase_order_no]
-        document = (po.supplier, delivery_note_no)
-        if document in self._registered_delivery_notes:
+        if delivery_note_no in self._registered_delivery_notes:
             return OperationResult(accepted=False, rejection=Rejection.DUPLICATE_DOCUMENT)
 
         po_lines = {line.line_no: line for line in po.lines}
-        # 先校验全部行，任一行不合法则整体拒绝，不做部分登记或截断
+        quantity_by_line: dict[int, int] = defaultdict(int)
         for line in lines:
-            open_quantity = (
-                po_lines[line.po_line_no].ordered_quantity
-                - self._received[(po.number, line.po_line_no)]
-            )
-            if line.quantity > open_quantity:
+            quantity_by_line[line.po_line_no] += line.quantity
+        # 先核对全部行，任一行不合法则整体拒绝，不做部分登记或截断
+        for po_line_no, quantity in quantity_by_line.items():
+            open_quantity = po_lines[po_line_no].ordered_quantity - self._received[(po.number, po_line_no)]
+            if quantity > open_quantity:
                 return OperationResult(accepted=False, rejection=Rejection.OVER_RECEIPT)
 
-        for line in lines:
-            self._received[(po.number, line.po_line_no)] += line.quantity
-            self._inventory[po_lines[line.po_line_no].material] += line.quantity
-        self._registered_delivery_notes.add(document)
+        for po_line_no, quantity in quantity_by_line.items():
+            self._received[(po.number, po_line_no)] += quantity
+            self._inventory[po_lines[po_line_no].material] += quantity
+        self._registered_delivery_notes.add(delivery_note_no)
         self._receipt_count += 1
         return OperationResult(accepted=True, receipt_no=f"GR-{self._receipt_count}")
 

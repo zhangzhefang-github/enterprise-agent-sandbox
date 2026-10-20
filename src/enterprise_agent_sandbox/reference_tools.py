@@ -21,8 +21,8 @@ class ReferenceToolLayer:
         self._sandbox = sandbox
         self._identity = identity
         self._seq = 0
-        # 逻辑请求 -> (请求内容, 幂等键)。内容改变则视为新的逻辑请求。
-        self._logical: dict[str, tuple[tuple, str]] = {}
+        # (逻辑请求标识, 请求内容) -> 幂等键。内容改变是另一次逻辑请求，原内容仍可重试。
+        self._logical: dict[tuple[str, tuple], str] = {}
 
     def register_goods_receipt(
         self,
@@ -33,13 +33,12 @@ class ReferenceToolLayer:
         lines: tuple[ReceiptLine, ...],
     ) -> ReferenceReceipt:
         content = (delivery_note_no, purchase_order_no, lines)
-        bound = self._logical.get(logical_request_id)
-        if bound is not None and bound[0] == content:
-            key = bound[1]
-        else:
+        slot = (logical_request_id, content)
+        key = self._logical.get(slot)
+        if key is None:
             # 幂等键不得使用送货单号，也不得直接沿用调用方传入的逻辑请求标识
             key = self._mint({delivery_note_no, logical_request_id})
-            self._logical[logical_request_id] = (content, key)
+            self._logical[slot] = key
         result = self._sandbox.register_goods_receipt(
             self._identity,
             idempotency_key=key,

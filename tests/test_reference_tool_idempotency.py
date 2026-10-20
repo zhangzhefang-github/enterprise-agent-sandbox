@@ -171,3 +171,32 @@ def test_s12_retry_does_not_increase_inventory_twice():
     assert retry.result.replayed
     assert retry.result.receipt_no == first.result.receipt_no
     assert sandbox.inventory_on_hand(CLERK, "M-1") == 6
+
+
+def test_retry_after_content_change_still_returns_the_original_result():
+    sandbox = new_sandbox()
+    tools = ReferenceToolLayer(sandbox, CLERK)
+
+    rejected = tools.register_goods_receipt(
+        logical_request_id="req-1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-1",
+        lines=(ReceiptLine(po_line_no=1, quantity=12),),
+    )
+    tools.register_goods_receipt(
+        logical_request_id="req-1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-1",
+        lines=(ReceiptLine(po_line_no=1, quantity=10),),
+    )
+    replay = tools.register_goods_receipt(
+        logical_request_id="req-1",
+        delivery_note_no="DN-1",
+        purchase_order_no="PO-1",
+        lines=(ReceiptLine(po_line_no=1, quantity=12),),
+    )
+
+    assert replay.idempotency_key == rejected.idempotency_key
+    assert replay.result.replayed
+    assert replay.result.rejection is Rejection.OVER_RECEIPT
+    assert sandbox.inventory_on_hand(CLERK, "M-1") == 10
