@@ -20,6 +20,10 @@ from enterprise_agent_sandbox.sandbox import (
     Rejection,
     Role,
     Sandbox,
+    SupplierInvoice,
+    SupplierInvoiceLine,
+    SupplierInvoiceRequest,
+    SupplierInvoiceStatus,
     TraceEntry,
 )
 
@@ -43,6 +47,10 @@ __all__ = [
     "Rejection",
     "Role",
     "Sandbox",
+    "SupplierInvoice",
+    "SupplierInvoiceLine",
+    "SupplierInvoiceRequest",
+    "SupplierInvoiceStatus",
     "Task",
     "TraceEntry",
 ]
