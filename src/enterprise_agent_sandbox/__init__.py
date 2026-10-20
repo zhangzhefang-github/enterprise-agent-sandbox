@@ -8,6 +8,7 @@ from enterprise_agent_sandbox.sandbox import (
     Rejection,
     Role,
     Sandbox,
+    TraceEntry,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "Rejection",
     "Role",
     "Sandbox",
+    "TraceEntry",
 ]
