@@ -22,6 +22,7 @@ class Rejection(Enum):
     UNKNOWN_PURCHASE_ORDER = "unknown_purchase_order"
     UNKNOWN_PURCHASE_ORDER_LINE = "unknown_purchase_order_line"
     EMPTY_GOODS_RECEIPT = "empty_goods_receipt"
+    EMPTY_SUPPLIER_INVOICE = "empty_supplier_invoice"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,50 @@ class ReceiptLine:
     quantity: int
 
 
+class SupplierInvoiceStatus(Enum):
+    ENTERED = "entered"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class SupplierInvoiceLine:
+    purchase_order_no: str
+    po_line_no: int
+    quantity: int
+    unit_price: Decimal
+
+
+@dataclass(frozen=True)
+class SupplierInvoice:
+    supplier: str
+    number: str
+    lines: tuple[SupplierInvoiceLine, ...]
+    status: SupplierInvoiceStatus
+
+
+@dataclass(frozen=True)
+class SupplierInvoiceRequest:
+    """录入发票时提交的业务请求。"""
+
+    supplier: str
+    invoice_no: str
+    lines: tuple[SupplierInvoiceLine, ...]
+
+
+@dataclass(frozen=True)
+class BusinessQueryRequest:
+    """查询请求。轨迹只记录这次查询，不复制被查询的单据内容。"""
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    """查询的结构化结果。拒绝时 records 为空，不返回业务数据。"""
+
+    accepted: bool
+    rejection: Rejection | None = None
+    records: tuple = ()
+
+
 @dataclass(frozen=True)
 class OperationResult:
     accepted: bool
@@ -72,7 +117,7 @@ class GoodsReceiptRequest:
 class TraceEntry:
     identity: Identity
     operation: str
-    request: GoodsReceiptRequest
+    request: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest
     accepted: bool
     rejection: Rejection | None
     receipt_no: str | None
@@ -81,8 +126,16 @@ class TraceEntry:
 
 
 class Sandbox:
-    def __init__(self, purchase_orders: list[PurchaseOrder]):
+    def __init__(
+        self,
+        purchase_orders: list[PurchaseOrder],
+        supplier_invoices: tuple[SupplierInvoice, ...] = (),
+    ):
         self._purchase_orders = {po.number: po for po in purchase_orders}
+        # (供应商, 发票号) -> 发票。初始数据可以预置已拒收的发票，录入不会把已录入改成已拒收。
+        self._supplier_invoices: dict[tuple[str, str], SupplierInvoice] = {
+            (invoice.supplier, invoice.number): invoice for invoice in supplier_invoices
+        }
         self._inventory: dict[str, int] = defaultdict(int)
         # 幂等键 -> (首次请求内容, 首次结果)
         self._idempotency: dict[str, tuple[tuple, OperationResult]] = {}
@@ -191,9 +244,10 @@ class Sandbox:
     def _record(
         self,
         identity: Identity,
-        submitted: GoodsReceiptRequest,
+        submitted: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest,
         result: OperationResult,
         inventory_before: dict[str, int],
+        operation: str = "register_goods_receipt",
     ) -> OperationResult:
         materials = set(inventory_before) | set(self._inventory)
         delta = tuple(
@@ -204,7 +258,7 @@ class Sandbox:
         self._trace.append(
             TraceEntry(
                 identity=identity,
-                operation="register_goods_receipt",
+                operation=operation,
                 request=submitted,
                 accepted=result.accepted,
                 rejection=result.rejection,
@@ -212,6 +266,96 @@ class Sandbox:
                 replayed=result.replayed,
                 inventory_delta=delta,
             )
+        )
+        return result
+
+    def enter_supplier_invoice(
+        self,
+        identity: Identity,
+        *,
+        idempotency_key: str,
+        supplier: str,
+        invoice_no: str,
+        lines: tuple[SupplierInvoiceLine, ...],
+    ) -> OperationResult:
+        with self._serialization:
+            return self._enter_supplier_invoice(
+                identity,
+                idempotency_key=idempotency_key,
+                supplier=supplier,
+                invoice_no=invoice_no,
+                lines=lines,
+            )
+
+    def _enter_supplier_invoice(
+        self,
+        identity: Identity,
+        *,
+        idempotency_key: str,
+        supplier: str,
+        invoice_no: str,
+        lines: tuple[SupplierInvoiceLine, ...],
+    ) -> OperationResult:
+        request = ("enter_invoice", identity, supplier, invoice_no, lines)
+        submitted = SupplierInvoiceRequest(supplier, invoice_no, lines)
+        inventory_before = {material: quantity for material, quantity in self._inventory.items()}
+        if idempotency_key in self._idempotency:
+            bound_request, bound_result = self._idempotency[idempotency_key]
+            if bound_request != request:
+                conflict = OperationResult(accepted=False, rejection=Rejection.IDEMPOTENCY_KEY_CONFLICT)
+                return self._record(identity, submitted, conflict, inventory_before, "enter_invoice")
+            return self._record(
+                identity,
+                submitted,
+                replace(bound_result, replayed=True),
+                inventory_before,
+                "enter_invoice",
+            )
+
+        # 录入发票要求应付会计。仅有收货员或没有任何角色都拒绝。同时持有两个角色可以录入。
+        if Role.AP_ACCOUNTANT not in identity.roles:
+            result = OperationResult(accepted=False, rejection=Rejection.ROLE_NOT_PERMITTED)
+        else:
+            result = self._enter_new_supplier_invoice(supplier, invoice_no, lines)
+        self._idempotency[idempotency_key] = (request, result)
+        return self._record(identity, submitted, result, inventory_before, "enter_invoice")
+
+    def _enter_new_supplier_invoice(
+        self,
+        supplier: str,
+        invoice_no: str,
+        lines: tuple[SupplierInvoiceLine, ...],
+    ) -> OperationResult:
+        # 已录入和已拒收都占用供应商加发票号。发票行对应属于判断层，这里不拒绝未知订单行。
+        if (supplier, invoice_no) in self._supplier_invoices:
+            return OperationResult(accepted=False, rejection=Rejection.DUPLICATE_DOCUMENT)
+        if not lines:
+            return OperationResult(accepted=False, rejection=Rejection.EMPTY_SUPPLIER_INVOICE)
+        self._supplier_invoices[(supplier, invoice_no)] = SupplierInvoice(
+            supplier, invoice_no, lines, SupplierInvoiceStatus.ENTERED
+        )
+        return OperationResult(accepted=True)
+
+    def supplier_invoices(self, identity: Identity) -> QueryResult:
+        with self._serialization:
+            return self._query(identity, "query_invoice", tuple(self._supplier_invoices.values()))
+
+    def payables(self, identity: Identity) -> QueryResult:
+        with self._serialization:
+            return self._query(identity, "query_payable", ())
+
+    def _query(self, identity: Identity, operation: str, records: tuple) -> QueryResult:
+        inventory_before = {material: quantity for material, quantity in self._inventory.items()}
+        if Role.AP_ACCOUNTANT not in identity.roles:
+            result = QueryResult(accepted=False, rejection=Rejection.ROLE_NOT_PERMITTED)
+        else:
+            result = QueryResult(accepted=True, records=records)
+        self._record(
+            identity,
+            BusinessQueryRequest(),
+            OperationResult(accepted=result.accepted, rejection=result.rejection),
+            inventory_before,
+            operation,
         )
         return result
 
