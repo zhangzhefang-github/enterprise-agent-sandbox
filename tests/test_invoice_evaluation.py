@@ -42,8 +42,8 @@ DOCUMENT = SupplierInvoiceDocument(
     ),
 )
 LINES = (
-    SupplierInvoiceLine("PO-1", 2, 4, Decimal("20.001")),
-    SupplierInvoiceLine("PO-1", 1, 6, Decimal("100.00")),
+    SupplierInvoiceLine("PO-1", 2, 4, Decimal("20.001"), invoice_line_no=1),
+    SupplierInvoiceLine("PO-1", 1, 6, Decimal("100.00"), invoice_line_no=2),
 )
 EXPECTED_TEXT = "\n".join(
     [
@@ -88,9 +88,12 @@ def scripted_invoice_agent(text, tools):
     po_lines = {"螺栓": 1, "垫片": 2}
     lines = []
     for document_line in document_lines:
-        _, _, order_no, description, _, quantity, _, unit_price = document_line.split()
+        source_line_no, _, order_no, description, _, quantity, _, unit_price = document_line.split()
         lines.append(
-            SupplierInvoiceLine(order_no, po_lines[description], int(quantity), Decimal(unit_price))
+            SupplierInvoiceLine(
+                order_no, po_lines[description], int(quantity), Decimal(unit_price),
+                invoice_line_no=int(source_line_no),
+            )
         )
     entry = tools.enter_supplier_invoice(
         logical_request_id="entry-1",

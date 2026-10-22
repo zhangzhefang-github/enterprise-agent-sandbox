@@ -1,4 +1,9 @@
-from enterprise_agent_sandbox.reference_tools import ReferenceInvoice, ReferenceReceipt, ReferenceToolLayer
+from enterprise_agent_sandbox.reference_tools import (
+    ReferenceInvoice,
+    ReferenceMatch,
+    ReferenceReceipt,
+    ReferenceToolLayer,
+)
 from enterprise_agent_sandbox.task import (
     BusinessOperation,
     DeliveryNote,
@@ -17,6 +22,9 @@ from enterprise_agent_sandbox.sandbox import (
     QueryResult,
     Identity,
     LostGoodsReceiptResponse,
+    MatchDifference,
+    MatchDifferenceKind,
+    MatchRequest,
     OperationResult,
     PurchaseOrder,
     PurchaseOrderLine,
@@ -42,6 +50,9 @@ __all__ = [
     "Identity",
     "InvalidTaskDefinition",
     "LostGoodsReceiptResponse",
+    "MatchDifference",
+    "MatchDifferenceKind",
+    "MatchRequest",
     "P2P_RULE_SET_VERSION",
     "OperationResult",
     "PurchaseOrder",
@@ -50,6 +61,7 @@ __all__ = [
     "ReceiptLine",
     "ReferenceReceipt",
     "ReferenceInvoice",
+    "ReferenceMatch",
     "ReferenceToolLayer",
     "Rejection",
     "Role",

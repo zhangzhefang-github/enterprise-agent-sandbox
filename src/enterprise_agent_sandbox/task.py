@@ -255,6 +255,14 @@ class EvaluationRun:
     def supplier_invoices(self):
         return self._sandbox.supplier_invoices(self._task.identity)
 
+    def match_supplier_invoice(self, *, idempotency_key: str, supplier: str, invoice_no: str):
+        return self._sandbox.match_supplier_invoice(
+            self._task.identity,
+            idempotency_key=idempotency_key,
+            supplier=supplier,
+            invoice_no=invoice_no,
+        )
+
     def payables(self):
         return self._sandbox.payables(self._task.identity)
 

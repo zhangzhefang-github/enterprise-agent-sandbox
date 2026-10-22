@@ -1,7 +1,7 @@
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from decimal import Context, Decimal, MAX_EMAX, MIN_EMIN, Overflow, localcontext
 from enum import Enum
 
 
@@ -23,6 +23,8 @@ class Rejection(Enum):
     UNKNOWN_PURCHASE_ORDER_LINE = "unknown_purchase_order_line"
     EMPTY_GOODS_RECEIPT = "empty_goods_receipt"
     EMPTY_SUPPLIER_INVOICE = "empty_supplier_invoice"
+    UNKNOWN_SUPPLIER_INVOICE = "unknown_supplier_invoice"
+    INVALID_INVOICE_STATE = "invalid_invoice_state"
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,33 @@ class ReceiptLine:
 
 class SupplierInvoiceStatus(Enum):
     ENTERED = "entered"
+    MATCHED = "matched"
+    HAS_DIFFERENCES = "has_differences"
     REJECTED = "rejected"
+
+
+class MatchDifferenceKind(Enum):
+    QUANTITY = "quantity"
+    UNIT_PRICE = "unit_price"
+    UNKNOWN_PURCHASE_ORDER = "unknown_purchase_order"
+    UNKNOWN_PURCHASE_ORDER_LINE = "unknown_purchase_order_line"
+    SUPPLIER_MISMATCH = "supplier_mismatch"
+    INVALID_QUANTITY = "invalid_quantity"
+    INVALID_UNIT_PRICE = "invalid_unit_price"
+
+
+@dataclass(frozen=True)
+class MatchDifference:
+    kind: MatchDifferenceKind
+    invoice_line_no: int
+    purchase_order_no: str
+    po_line_no: int
+    invoice_quantity: int
+    invoice_unit_price: Decimal
+    total_invoice_quantity: int
+    available_quantity: int | None = None
+    order_unit_price: Decimal | None = None
+    relative_price_difference: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +91,7 @@ class SupplierInvoiceLine:
     po_line_no: int
     quantity: int
     unit_price: Decimal
+    invoice_line_no: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +100,13 @@ class SupplierInvoice:
     number: str
     lines: tuple[SupplierInvoiceLine, ...]
     status: SupplierInvoiceStatus
+    differences: tuple[MatchDifference, ...] = ()
+
+
+@dataclass(frozen=True)
+class MatchRequest:
+    supplier: str
+    invoice_no: str
 
 
 @dataclass(frozen=True)
@@ -102,6 +138,8 @@ class OperationResult:
     rejection: Rejection | None = None
     receipt_no: str | None = None
     replayed: bool = False
+    invoice_status: SupplierInvoiceStatus | None = None
+    differences: tuple[MatchDifference, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -117,12 +155,14 @@ class GoodsReceiptRequest:
 class TraceEntry:
     identity: Identity
     operation: str
-    request: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest
+    request: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest | MatchRequest
     accepted: bool
     rejection: Rejection | None
     receipt_no: str | None
     replayed: bool
     inventory_delta: tuple[tuple[str, int], ...]
+    invoice_status: SupplierInvoiceStatus | None = None
+    differences: tuple[MatchDifference, ...] = ()
 
 
 class Sandbox:
@@ -244,7 +284,7 @@ class Sandbox:
     def _record(
         self,
         identity: Identity,
-        submitted: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest,
+        submitted: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest | MatchRequest,
         result: OperationResult,
         inventory_before: dict[str, int],
         operation: str = "register_goods_receipt",
@@ -265,6 +305,8 @@ class Sandbox:
                 receipt_no=result.receipt_no,
                 replayed=result.replayed,
                 inventory_delta=delta,
+                invoice_status=result.invoice_status,
+                differences=result.differences,
             )
         )
         return result
@@ -336,6 +378,89 @@ class Sandbox:
         )
         return OperationResult(accepted=True)
 
+    def match_supplier_invoice(
+        self,
+        identity: Identity,
+        *,
+        idempotency_key: str,
+        supplier: str,
+        invoice_no: str,
+    ) -> OperationResult:
+        with self._serialization:
+            request = ("match", identity, supplier, invoice_no)
+            submitted = MatchRequest(supplier, invoice_no)
+            inventory_before = dict(self._inventory)
+            if idempotency_key in self._idempotency:
+                bound_request, bound_result = self._idempotency[idempotency_key]
+                if bound_request != request:
+                    result = OperationResult(False, Rejection.IDEMPOTENCY_KEY_CONFLICT)
+                else:
+                    result = replace(bound_result, replayed=True)
+            else:
+                if Role.AP_ACCOUNTANT not in identity.roles:
+                    result = OperationResult(False, Rejection.ROLE_NOT_PERMITTED)
+                else:
+                    result = self._match_supplier_invoice(supplier, invoice_no)
+                self._idempotency[idempotency_key] = (request, result)
+            return self._record(identity, submitted, result, inventory_before, "match")
+
+    def _match_supplier_invoice(self, supplier: str, invoice_no: str) -> OperationResult:
+        invoice = self._supplier_invoices.get((supplier, invoice_no))
+        if invoice is None:
+            return OperationResult(False, Rejection.UNKNOWN_SUPPLIER_INVOICE)
+        if invoice.status not in {SupplierInvoiceStatus.ENTERED, SupplierInvoiceStatus.HAS_DIFFERENCES}:
+            return OperationResult(False, Rejection.INVALID_INVOICE_STATE)
+        if not invoice.lines:
+            return OperationResult(False, Rejection.EMPTY_SUPPLIER_INVOICE)
+
+        quantities: dict[tuple[str, int], int] = defaultdict(int)
+        for line in invoice.lines:
+            if line.quantity > 0:
+                quantities[(line.purchase_order_no, line.po_line_no)] += line.quantity
+
+        differences = []
+        for index, line in enumerate(invoice.lines, start=1):
+            key = (line.purchase_order_no, line.po_line_no)
+            detail = dict(
+                invoice_line_no=line.invoice_line_no if line.invoice_line_no is not None else index,
+                purchase_order_no=line.purchase_order_no,
+                po_line_no=line.po_line_no,
+                invoice_quantity=line.quantity,
+                invoice_unit_price=line.unit_price,
+                total_invoice_quantity=quantities[key],
+            )
+            if line.quantity <= 0:
+                differences.append(MatchDifference(MatchDifferenceKind.INVALID_QUANTITY, **detail))
+            order = self._purchase_orders.get(line.purchase_order_no)
+            if order is None:
+                differences.append(MatchDifference(MatchDifferenceKind.UNKNOWN_PURCHASE_ORDER, **detail))
+                continue
+            order_line = next((item for item in order.lines if item.line_no == line.po_line_no), None)
+            if order_line is None:
+                differences.append(MatchDifference(MatchDifferenceKind.UNKNOWN_PURCHASE_ORDER_LINE, **detail))
+                continue
+            # 本切片尚无过账操作或预置已过账数据，已过账数量恒为零。
+            # #11 接入过账时，须改为已收数量减累计已过账数量，并覆盖扣减测试。
+            available = self._received.get(key, 0)
+            detail.update(available_quantity=available, order_unit_price=order_line.unit_price)
+            if order.supplier != supplier:
+                differences.append(MatchDifference(MatchDifferenceKind.SUPPLIER_MISMATCH, **detail))
+            if quantities[key] > available:
+                differences.append(MatchDifference(MatchDifferenceKind.QUANTITY, **detail))
+            if any(not price.is_finite() or price < 0 for price in (line.unit_price, order_line.unit_price)):
+                differences.append(MatchDifference(MatchDifferenceKind.INVALID_UNIT_PRICE, **detail))
+                continue
+            outside_tolerance, relative = _price_difference(line.unit_price, order_line.unit_price)
+            if outside_tolerance:
+                differences.append(MatchDifference(
+                    MatchDifferenceKind.UNIT_PRICE, relative_price_difference=relative, **detail
+                ))
+
+        status = SupplierInvoiceStatus.HAS_DIFFERENCES if differences else SupplierInvoiceStatus.MATCHED
+        details = tuple(differences)
+        self._supplier_invoices[(supplier, invoice_no)] = replace(invoice, status=status, differences=details)
+        return OperationResult(True, invoice_status=status, differences=details)
+
     def supplier_invoices(self, identity: Identity) -> QueryResult:
         with self._serialization:
             return self._query(identity, "query_invoice", tuple(self._supplier_invoices.values()))
@@ -362,3 +487,17 @@ class Sandbox:
     def inventory_on_hand(self, identity: Identity, material: str) -> int:
         with self._serialization:
             return self._inventory[material]
+
+
+def _price_difference(invoice_price: Decimal, order_price: Decimal) -> tuple[bool, Decimal | None]:
+    # 直接比较订单价的 98% 和 102%，乘法精度只由有效数字数决定，
+    # 不随两输入的指数差增长。相对差仅供展示，不参与容差判断。
+    precision = max(28, len(invoice_price.as_tuple().digits), len(order_price.as_tuple().digits)) + 4
+    with localcontext(Context(prec=precision, Emax=MAX_EMAX, Emin=MIN_EMIN)) as context:
+        context.traps[Overflow] = False
+        outside_tolerance = not order_price * Decimal("0.98") <= invoice_price <= order_price * Decimal("1.02")
+        # 零价订单的相对差无定义；同为零价无差异，非零发票价保留为单价差异。
+        relative = (invoice_price / order_price - 1).copy_abs() if order_price else None
+        if relative is not None and not relative.is_finite():
+            relative = None
+        return outside_tolerance, relative
