@@ -4,6 +4,8 @@ from enum import Enum
 
 from enterprise_agent_sandbox.reference_tools import ReferenceToolLayer
 from enterprise_agent_sandbox.sandbox import (
+    ApprovalDecision,
+    ApprovalScript,
     Identity,
     PurchaseOrder,
     ReceiptLine,
@@ -92,6 +94,7 @@ class Task:
     repetitions: int
     invoice_documents: tuple[SupplierInvoiceDocument, ...] = ()
     initial_supplier_invoices: tuple[SupplierInvoice, ...] = ()
+    approval_script: tuple[ApprovalScript, ...] = ()
 
     @staticmethod
     def define(
@@ -108,6 +111,7 @@ class Task:
         repetitions: int | None = None,
         invoice_documents: tuple[SupplierInvoiceDocument, ...] = (),
         initial_supplier_invoices: tuple[SupplierInvoice, ...] = (),
+        approval_script: tuple[ApprovalScript, ...] = (),
     ) -> "Task":
         if rule_set_version != P2P_RULE_SET_VERSION:
             raise InvalidTaskDefinition("规则集版本必须是第一期固定版本")
@@ -147,6 +151,15 @@ class Task:
             if key in invoice_numbers:
                 raise InvalidTaskDefinition("初始发票的供应商和发票号不能重复")
             invoice_numbers.add(key)
+        approval_keys: set[tuple[str, str]] = set()
+        for entry in approval_script:
+            if not isinstance(entry.decision, ApprovalDecision):
+                raise InvalidTaskDefinition("审批脚本决定必须是批准或驳回")
+            key = (_require_text(entry.supplier, "审批脚本供应商不能为空"),
+                   _require_text(entry.invoice_no, "审批脚本发票号不能为空"))
+            if key in approval_keys:
+                raise InvalidTaskDefinition("审批脚本的供应商和发票号不能重复")
+            approval_keys.add(key)
         goal = _require_text(business_goal, "业务目标不能为空")
         if not final_state_assertions:
             raise InvalidTaskDefinition("评测任务必须给出最终状态断言")
@@ -172,6 +185,7 @@ class Task:
             repetitions=repeat_count,
             invoice_documents=invoice_documents,
             initial_supplier_invoices=initial_supplier_invoices,
+            approval_script=approval_script,
         )
 
     def render_documents(self) -> str:
@@ -210,6 +224,7 @@ class EvaluationRun:
         self._sandbox = Sandbox(
             purchase_orders=list(task.purchase_orders),
             supplier_invoices=task.initial_supplier_invoices,
+            approval_script=task.approval_script,
         )
         self._reference_tools = ReferenceToolLayer(self._sandbox, task.identity)
 
@@ -265,6 +280,19 @@ class EvaluationRun:
 
     def payables(self):
         return self._sandbox.payables(self._task.identity)
+
+    def request_invoice_approval(
+        self, *, idempotency_key: str, supplier: str, invoice_no: str
+    ):
+        return self._sandbox.request_invoice_approval(
+            self._task.identity,
+            idempotency_key=idempotency_key,
+            supplier=supplier,
+            invoice_no=invoice_no,
+        )
+
+    def approvals(self):
+        return self._sandbox.approvals(self._task.identity)
 
     def reference_tools(self) -> ReferenceToolLayer:
         """同一次运行共用工具层及幂等键记忆，权限取自任务身份。"""

@@ -8,6 +8,7 @@ from enum import Enum
 class Role(Enum):
     RECEIVING_CLERK = "receiving_clerk"
     AP_ACCOUNTANT = "ap_accountant"
+    SIMULATED_APPROVER = "simulated_approver"
 
 
 class LostGoodsReceiptResponse(Exception):
@@ -25,12 +26,18 @@ class Rejection(Enum):
     EMPTY_SUPPLIER_INVOICE = "empty_supplier_invoice"
     UNKNOWN_SUPPLIER_INVOICE = "unknown_supplier_invoice"
     INVALID_INVOICE_STATE = "invalid_invoice_state"
+    APPROVAL_NOT_PRICE_ONLY = "approval_not_price_only"
+    APPROVAL_SCRIPT_MISSING = "approval_script_missing"
+    APPROVAL_ALREADY_REJECTED = "approval_already_rejected"
 
 
 @dataclass(frozen=True)
 class Identity:
     name: str
     roles: frozenset[Role]
+
+
+SIMULATED_APPROVER = Identity("simulated-approver", frozenset({Role.SIMULATED_APPROVER}))
 
 
 @dataclass(frozen=True)
@@ -58,7 +65,36 @@ class SupplierInvoiceStatus(Enum):
     ENTERED = "entered"
     MATCHED = "matched"
     HAS_DIFFERENCES = "has_differences"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    APPROVAL_REJECTED = "approval_rejected"
     REJECTED = "rejected"
+
+
+class ApprovalDecision(Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class ApprovalStatus(Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class ApprovalScript:
+    supplier: str
+    invoice_no: str
+    decision: ApprovalDecision
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    supplier: str
+    invoice_no: str
+    requester: Identity
+    status: ApprovalStatus
 
 
 class MatchDifferenceKind(Enum):
@@ -110,6 +146,19 @@ class MatchRequest:
 
 
 @dataclass(frozen=True)
+class ApprovalRequest:
+    supplier: str
+    invoice_no: str
+
+
+@dataclass(frozen=True)
+class ApprovalDecisionEvent:
+    supplier: str
+    invoice_no: str
+    decision: ApprovalDecision
+
+
+@dataclass(frozen=True)
 class SupplierInvoiceRequest:
     """录入发票时提交的业务请求。"""
 
@@ -140,6 +189,7 @@ class OperationResult:
     replayed: bool = False
     invoice_status: SupplierInvoiceStatus | None = None
     differences: tuple[MatchDifference, ...] = ()
+    approval_status: ApprovalStatus | None = None
 
 
 @dataclass(frozen=True)
@@ -155,7 +205,14 @@ class GoodsReceiptRequest:
 class TraceEntry:
     identity: Identity
     operation: str
-    request: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest | MatchRequest
+    request: (
+        GoodsReceiptRequest
+        | SupplierInvoiceRequest
+        | BusinessQueryRequest
+        | MatchRequest
+        | ApprovalRequest
+        | ApprovalDecisionEvent
+    )
     accepted: bool
     rejection: Rejection | None
     receipt_no: str | None
@@ -163,6 +220,7 @@ class TraceEntry:
     inventory_delta: tuple[tuple[str, int], ...]
     invoice_status: SupplierInvoiceStatus | None = None
     differences: tuple[MatchDifference, ...] = ()
+    approval_status: ApprovalStatus | None = None
 
 
 class Sandbox:
@@ -170,12 +228,17 @@ class Sandbox:
         self,
         purchase_orders: list[PurchaseOrder],
         supplier_invoices: tuple[SupplierInvoice, ...] = (),
+        approval_script: tuple[ApprovalScript, ...] = (),
     ):
         self._purchase_orders = {po.number: po for po in purchase_orders}
         # (供应商, 发票号) -> 发票。初始数据可以预置已拒收的发票，录入不会把已录入改成已拒收。
         self._supplier_invoices: dict[tuple[str, str], SupplierInvoice] = {
             (invoice.supplier, invoice.number): invoice for invoice in supplier_invoices
         }
+        self._approval_script = {
+            (entry.supplier, entry.invoice_no): entry.decision for entry in approval_script
+        }
+        self._approvals: dict[tuple[str, str], ApprovalRecord] = {}
         self._inventory: dict[str, int] = defaultdict(int)
         # 幂等键 -> (首次请求内容, 首次结果)
         self._idempotency: dict[str, tuple[tuple, OperationResult]] = {}
@@ -284,7 +347,14 @@ class Sandbox:
     def _record(
         self,
         identity: Identity,
-        submitted: GoodsReceiptRequest | SupplierInvoiceRequest | BusinessQueryRequest | MatchRequest,
+        submitted: (
+            GoodsReceiptRequest
+            | SupplierInvoiceRequest
+            | BusinessQueryRequest
+            | MatchRequest
+            | ApprovalRequest
+            | ApprovalDecisionEvent
+        ),
         result: OperationResult,
         inventory_before: dict[str, int],
         operation: str = "register_goods_receipt",
@@ -307,6 +377,7 @@ class Sandbox:
                 inventory_delta=delta,
                 invoice_status=result.invoice_status,
                 differences=result.differences,
+                approval_status=result.approval_status,
             )
         )
         return result
@@ -464,6 +535,98 @@ class Sandbox:
     def supplier_invoices(self, identity: Identity) -> QueryResult:
         with self._serialization:
             return self._query(identity, "query_invoice", tuple(self._supplier_invoices.values()))
+
+    def request_invoice_approval(
+        self,
+        identity: Identity,
+        *,
+        idempotency_key: str,
+        supplier: str,
+        invoice_no: str,
+    ) -> OperationResult:
+        with self._serialization:
+            request = ("request_approval", identity, supplier, invoice_no)
+            submitted = ApprovalRequest(supplier, invoice_no)
+            inventory_before = dict(self._inventory)
+            if idempotency_key in self._idempotency:
+                bound_request, bound_result = self._idempotency[idempotency_key]
+                if bound_request != request:
+                    result = OperationResult(False, Rejection.IDEMPOTENCY_KEY_CONFLICT)
+                else:
+                    result = replace(bound_result, replayed=True)
+                return self._record(identity, submitted, result, inventory_before, "request_approval")
+
+            rejection = self._approval_rejection(identity, supplier, invoice_no)
+            if rejection is not None:
+                result = OperationResult(False, rejection)
+                self._idempotency[idempotency_key] = (request, result)
+                return self._record(identity, submitted, result, inventory_before, "request_approval")
+
+            key = (supplier, invoice_no)
+            invoice = self._supplier_invoices[key]
+            pending = ApprovalRecord(supplier, invoice_no, identity, ApprovalStatus.PENDING)
+            self._approvals[key] = pending
+            self._supplier_invoices[key] = replace(
+                invoice, status=SupplierInvoiceStatus.PENDING_APPROVAL
+            )
+            self._record(
+                identity,
+                submitted,
+                OperationResult(
+                    True,
+                    invoice_status=SupplierInvoiceStatus.PENDING_APPROVAL,
+                    approval_status=ApprovalStatus.PENDING,
+                ),
+                inventory_before,
+                "request_approval",
+            )
+
+            decision = self._approval_script[key]
+            if decision is ApprovalDecision.APPROVE:
+                approval_status = ApprovalStatus.APPROVED
+                invoice_status = SupplierInvoiceStatus.APPROVED
+            else:
+                approval_status = ApprovalStatus.REJECTED
+                invoice_status = SupplierInvoiceStatus.APPROVAL_REJECTED
+            self._approvals[key] = replace(pending, status=approval_status)
+            self._supplier_invoices[key] = replace(invoice, status=invoice_status)
+            result = OperationResult(
+                True, invoice_status=invoice_status, approval_status=approval_status
+            )
+            self._idempotency[idempotency_key] = (request, result)
+            self._record(
+                SIMULATED_APPROVER,
+                ApprovalDecisionEvent(supplier, invoice_no, decision),
+                result,
+                inventory_before,
+                "approval_decision",
+            )
+            return result
+
+    def _approval_rejection(
+        self, identity: Identity, supplier: str, invoice_no: str
+    ) -> Rejection | None:
+        if Role.AP_ACCOUNTANT not in identity.roles:
+            return Rejection.ROLE_NOT_PERMITTED
+        invoice = self._supplier_invoices.get((supplier, invoice_no))
+        if invoice is None:
+            return Rejection.UNKNOWN_SUPPLIER_INVOICE
+        if invoice.status is SupplierInvoiceStatus.APPROVAL_REJECTED:
+            return Rejection.APPROVAL_ALREADY_REJECTED
+        if invoice.status is not SupplierInvoiceStatus.HAS_DIFFERENCES:
+            return Rejection.INVALID_INVOICE_STATE
+        if not invoice.differences or any(
+            difference.kind is not MatchDifferenceKind.UNIT_PRICE
+            for difference in invoice.differences
+        ):
+            return Rejection.APPROVAL_NOT_PRICE_ONLY
+        if (supplier, invoice_no) not in self._approval_script:
+            return Rejection.APPROVAL_SCRIPT_MISSING
+        return None
+
+    def approvals(self, identity: Identity) -> QueryResult:
+        with self._serialization:
+            return self._query(identity, "query_approval", tuple(self._approvals.values()))
 
     def payables(self, identity: Identity) -> QueryResult:
         with self._serialization:
