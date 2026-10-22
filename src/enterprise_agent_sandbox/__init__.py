@@ -1,4 +1,5 @@
 from enterprise_agent_sandbox.reference_tools import (
+    ReferenceApproval,
     ReferenceInvoice,
     ReferenceMatch,
     ReferenceReceipt,
@@ -17,6 +18,12 @@ from enterprise_agent_sandbox.task import (
     Task,
 )
 from enterprise_agent_sandbox.sandbox import (
+    ApprovalDecision,
+    ApprovalDecisionEvent,
+    ApprovalRecord,
+    ApprovalRequest,
+    ApprovalScript,
+    ApprovalStatus,
     BusinessQueryRequest,
     GoodsReceiptRequest,
     QueryResult,
@@ -31,6 +38,7 @@ from enterprise_agent_sandbox.sandbox import (
     ReceiptLine,
     Rejection,
     Role,
+    SIMULATED_APPROVER,
     Sandbox,
     SupplierInvoice,
     SupplierInvoiceLine,
@@ -40,6 +48,12 @@ from enterprise_agent_sandbox.sandbox import (
 )
 
 __all__ = [
+    "ApprovalDecision",
+    "ApprovalDecisionEvent",
+    "ApprovalRecord",
+    "ApprovalRequest",
+    "ApprovalScript",
+    "ApprovalStatus",
     "BusinessOperation",
     "BusinessQueryRequest",
     "DeliveryNote",
@@ -60,11 +74,13 @@ __all__ = [
     "PurchaseOrderLine",
     "ReceiptLine",
     "ReferenceReceipt",
+    "ReferenceApproval",
     "ReferenceInvoice",
     "ReferenceMatch",
     "ReferenceToolLayer",
     "Rejection",
     "Role",
+    "SIMULATED_APPROVER",
     "Sandbox",
     "SupplierInvoice",
     "SupplierInvoiceDocument",

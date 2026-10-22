@@ -31,6 +31,12 @@ class ReferenceMatch:
     result: OperationResult
 
 
+@dataclass(frozen=True)
+class ReferenceApproval:
+    idempotency_key: str
+    result: OperationResult
+
+
 class ReferenceToolLayer:
     """参考工具层：把收货和发票工具映射为业务操作，并自行选择幂等键。"""
 
@@ -100,6 +106,25 @@ class ReferenceToolLayer:
 
     def payables(self) -> QueryResult:
         return self._sandbox.payables(self._identity)
+
+    def request_invoice_approval(
+        self, *, logical_request_id: str, supplier: str, invoice_no: str
+    ) -> ReferenceApproval:
+        key, result = self._execute(
+            logical_request_id,
+            ("request_approval", supplier, invoice_no),
+            invoice_no,
+            lambda key: self._sandbox.request_invoice_approval(
+                self._identity,
+                idempotency_key=key,
+                supplier=supplier,
+                invoice_no=invoice_no,
+            ),
+        )
+        return ReferenceApproval(idempotency_key=key, result=result)
+
+    def approvals(self) -> QueryResult:
+        return self._sandbox.approvals(self._identity)
 
     def _execute(
         self,
