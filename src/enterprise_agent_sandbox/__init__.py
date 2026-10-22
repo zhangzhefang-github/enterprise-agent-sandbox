@@ -1,4 +1,4 @@
-from enterprise_agent_sandbox.reference_tools import ReferenceReceipt, ReferenceToolLayer
+from enterprise_agent_sandbox.reference_tools import ReferenceInvoice, ReferenceReceipt, ReferenceToolLayer
 from enterprise_agent_sandbox.task import (
     BusinessOperation,
     DeliveryNote,
@@ -7,6 +7,8 @@ from enterprise_agent_sandbox.task import (
     ExecutionBudget,
     InvalidTaskDefinition,
     P2P_RULE_SET_VERSION,
+    SupplierInvoiceDocument,
+    SupplierInvoiceDocumentLine,
     Task,
 )
 from enterprise_agent_sandbox.sandbox import (
@@ -47,11 +49,14 @@ __all__ = [
     "PurchaseOrderLine",
     "ReceiptLine",
     "ReferenceReceipt",
+    "ReferenceInvoice",
     "ReferenceToolLayer",
     "Rejection",
     "Role",
     "Sandbox",
     "SupplierInvoice",
+    "SupplierInvoiceDocument",
+    "SupplierInvoiceDocumentLine",
     "SupplierInvoiceLine",
     "SupplierInvoiceRequest",
     "SupplierInvoiceStatus",

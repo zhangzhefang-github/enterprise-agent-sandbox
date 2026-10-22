@@ -3,8 +3,10 @@ from dataclasses import dataclass
 from enterprise_agent_sandbox.sandbox import (
     Identity,
     OperationResult,
+    QueryResult,
     ReceiptLine,
     Sandbox,
+    SupplierInvoiceLine,
 )
 
 
@@ -14,8 +16,14 @@ class ReferenceReceipt:
     result: OperationResult
 
 
+@dataclass(frozen=True)
+class ReferenceInvoice:
+    idempotency_key: str
+    result: OperationResult
+
+
 class ReferenceToolLayer:
-    """参考工具层：把登记收货映射为业务操作，并自行选择幂等键。"""
+    """参考工具层：把收货和发票工具映射为业务操作，并自行选择幂等键。"""
 
     def __init__(self, sandbox: Sandbox, identity: Identity):
         self._sandbox = sandbox
@@ -32,7 +40,7 @@ class ReferenceToolLayer:
         purchase_order_no: str,
         lines: tuple[ReceiptLine, ...],
     ) -> ReferenceReceipt:
-        content = (delivery_note_no, purchase_order_no, lines)
+        content = ("register_goods_receipt", delivery_note_no, purchase_order_no, lines)
         slot = (logical_request_id, content)
         key = self._logical.get(slot)
         if key is None:
@@ -47,6 +55,35 @@ class ReferenceToolLayer:
             lines=lines,
         )
         return ReferenceReceipt(idempotency_key=key, result=result)
+
+    def enter_supplier_invoice(
+        self,
+        *,
+        logical_request_id: str,
+        supplier: str,
+        invoice_no: str,
+        lines: tuple[SupplierInvoiceLine, ...],
+    ) -> ReferenceInvoice:
+        content = ("enter_invoice", supplier, invoice_no, lines)
+        slot = (logical_request_id, content)
+        key = self._logical.get(slot)
+        if key is None:
+            key = self._mint({invoice_no, logical_request_id})
+            self._logical[slot] = key
+        result = self._sandbox.enter_supplier_invoice(
+            self._identity,
+            idempotency_key=key,
+            supplier=supplier,
+            invoice_no=invoice_no,
+            lines=lines,
+        )
+        return ReferenceInvoice(idempotency_key=key, result=result)
+
+    def supplier_invoices(self) -> QueryResult:
+        return self._sandbox.supplier_invoices(self._identity)
+
+    def payables(self) -> QueryResult:
+        return self._sandbox.payables(self._identity)
 
     def _mint(self, forbidden: set[str]) -> str:
         while True:
