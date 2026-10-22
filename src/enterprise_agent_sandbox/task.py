@@ -1,8 +1,16 @@
 from dataclasses import dataclass
-
+from decimal import Decimal
 from enum import Enum
 
-from enterprise_agent_sandbox.sandbox import Identity, PurchaseOrder, ReceiptLine, Sandbox
+from enterprise_agent_sandbox.reference_tools import ReferenceToolLayer
+from enterprise_agent_sandbox.sandbox import (
+    Identity,
+    PurchaseOrder,
+    ReceiptLine,
+    Sandbox,
+    SupplierInvoice,
+    SupplierInvoiceLine,
+)
 
 
 class BusinessOperation(Enum):
@@ -53,6 +61,24 @@ class DeliveryNote:
 
 
 @dataclass(frozen=True)
+class SupplierInvoiceDocumentLine:
+    """供应商单据行号不等于采购订单行号；对应关系由被测 Agent 提交。"""
+
+    line_no: int
+    purchase_order_no: str
+    supplier_material_description: str
+    quantity: int
+    unit_price: Decimal
+
+
+@dataclass(frozen=True)
+class SupplierInvoiceDocument:
+    supplier: str
+    number: str
+    lines: tuple[SupplierInvoiceDocumentLine, ...]
+
+
+@dataclass(frozen=True)
 class Task:
     rule_set_version: str
     identity: Identity
@@ -64,6 +90,8 @@ class Task:
     forbidden_operations: tuple[BusinessOperation, ...]
     execution_budget: ExecutionBudget
     repetitions: int
+    invoice_documents: tuple[SupplierInvoiceDocument, ...] = ()
+    initial_supplier_invoices: tuple[SupplierInvoice, ...] = ()
 
     @staticmethod
     def define(
@@ -71,13 +99,15 @@ class Task:
         rule_set_version: str,
         identity: Identity,
         purchase_orders: tuple[PurchaseOrder, ...],
-        delivery_notes: tuple[DeliveryNote, ...],
+        delivery_notes: tuple[DeliveryNote, ...] = (),
         business_goal: str,
         final_state_assertions: tuple[str, ...],
         allowed_operations: tuple[BusinessOperation, ...],
         forbidden_operations: tuple[BusinessOperation, ...] = (),
         execution_budget: ExecutionBudget | None = None,
         repetitions: int | None = None,
+        invoice_documents: tuple[SupplierInvoiceDocument, ...] = (),
+        initial_supplier_invoices: tuple[SupplierInvoice, ...] = (),
     ) -> "Task":
         if rule_set_version != P2P_RULE_SET_VERSION:
             raise InvalidTaskDefinition("规则集版本必须是第一期固定版本")
@@ -86,8 +116,8 @@ class Task:
         if not purchase_orders:
             raise InvalidTaskDefinition("评测任务必须给出初始采购订单")
         orders = _index_purchase_orders(purchase_orders)
-        if not delivery_notes:
-            raise InvalidTaskDefinition("评测任务必须给出送货单")
+        if not delivery_notes and not invoice_documents:
+            raise InvalidTaskDefinition("评测任务必须给出送货单或供应商发票单据")
         for document in delivery_notes:
             _require_text(document.number, "送货单号不能为空")
             order = orders.get(document.purchase_order_no)
@@ -99,6 +129,24 @@ class Task:
                 if line.po_line_no not in order:
                     raise InvalidTaskDefinition("送货单引用了采购订单上不存在的行")
                 _require_text(line.supplier_material_description, "供应商物料描述不能为空")
+        for document in invoice_documents:
+            _require_text(document.supplier, "供应商不能为空")
+            _require_text(document.number, "发票号不能为空")
+            if not document.lines:
+                raise InvalidTaskDefinition("供应商发票单据必须有行")
+            line_numbers: set[int] = set()
+            for line in document.lines:
+                if line.line_no in line_numbers:
+                    raise InvalidTaskDefinition("同一供应商发票单据的行号不能重复")
+                line_numbers.add(line.line_no)
+                _require_text(line.purchase_order_no, "发票单据的采购订单号不能为空")
+                _require_text(line.supplier_material_description, "供应商物料描述不能为空")
+        invoice_numbers: set[tuple[str, str]] = set()
+        for invoice in initial_supplier_invoices:
+            key = (invoice.supplier, invoice.number)
+            if key in invoice_numbers:
+                raise InvalidTaskDefinition("初始发票的供应商和发票号不能重复")
+            invoice_numbers.add(key)
         goal = _require_text(business_goal, "业务目标不能为空")
         if not final_state_assertions:
             raise InvalidTaskDefinition("评测任务必须给出最终状态断言")
@@ -122,6 +170,8 @@ class Task:
             forbidden_operations=forbidden_operations,
             execution_budget=budget,
             repetitions=repeat_count,
+            invoice_documents=invoice_documents,
+            initial_supplier_invoices=initial_supplier_invoices,
         )
 
     def render_documents(self) -> str:
@@ -137,15 +187,31 @@ class Task:
                 for line in document.lines
             )
             blocks.append("\n".join(lines))
+        for document in self.invoice_documents:
+            lines = [
+                f"供应商发票 {document.number}",
+                f"供应商 {document.supplier}",
+                "不含税",
+            ]
+            lines.extend(
+                f"{line.line_no} 采购订单 {line.purchase_order_no} "
+                f"{line.supplier_material_description} 数量 {line.quantity} 单价 {line.unit_price:f}"
+                for line in document.lines
+            )
+            blocks.append("\n".join(lines))
         return "\n\n".join(blocks)
 
 
 class EvaluationRun:
-    """一次评测运行。每次开始都从任务的初始采购订单重建环境。"""
+    """一次评测运行。每次开始都从任务的初始业务数据重建环境。"""
 
     def __init__(self, task: Task):
         self._task = task
-        self._sandbox = Sandbox(purchase_orders=list(task.purchase_orders))
+        self._sandbox = Sandbox(
+            purchase_orders=list(task.purchase_orders),
+            supplier_invoices=task.initial_supplier_invoices,
+        )
+        self._reference_tools = ReferenceToolLayer(self._sandbox, task.identity)
 
     @classmethod
     def start(cls, task: Task) -> "EvaluationRun":
@@ -169,6 +235,32 @@ class EvaluationRun:
 
     def inventory_on_hand(self, material: str) -> int:
         return self._sandbox.inventory_on_hand(self._task.identity, material)
+
+    def enter_supplier_invoice(
+        self,
+        *,
+        idempotency_key: str,
+        supplier: str,
+        invoice_no: str,
+        lines: tuple[SupplierInvoiceLine, ...],
+    ):
+        return self._sandbox.enter_supplier_invoice(
+            self._task.identity,
+            idempotency_key=idempotency_key,
+            supplier=supplier,
+            invoice_no=invoice_no,
+            lines=lines,
+        )
+
+    def supplier_invoices(self):
+        return self._sandbox.supplier_invoices(self._task.identity)
+
+    def payables(self):
+        return self._sandbox.payables(self._task.identity)
+
+    def reference_tools(self) -> ReferenceToolLayer:
+        """同一次运行共用工具层及幂等键记忆，权限取自任务身份。"""
+        return self._reference_tools
 
     def execution_trace(self):
         return self._sandbox.execution_trace()
