@@ -1,4 +1,5 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_UP, localcontext
 
 import pytest
@@ -334,6 +335,105 @@ def test_zero_order_price_does_not_divide_by_zero(price, expected):
     enter(run, price=price)
     result = match(run).result
     assert result.invoice_status is expected
-    if result.differences:
-        assert result.differences[0].kind is MatchDifferenceKind.UNIT_PRICE
-        assert result.differences[0].relative_price_difference is None
+    if price == "0":
+        assert result.differences == ()
+    else:
+        difference, = result.differences
+        assert difference.kind is MatchDifferenceKind.UNIT_PRICE
+        assert difference.relative_price_difference is None
+
+
+def test_negative_invoice_quantity_cannot_offset_over_invoicing():
+    run = EvaluationRun.start(define_task())
+    receive(run, 6)
+    enter(run, lines=(
+        SupplierInvoiceLine("PO-1", 1, 10, Decimal("100")),
+        SupplierInvoiceLine("PO-1", 1, -4, Decimal("100")),
+    ))
+    result = match(run).result
+    assert result.invoice_status is SupplierInvoiceStatus.HAS_DIFFERENCES
+    assert any(item.kind is MatchDifferenceKind.QUANTITY for item in result.differences)
+    assert any(item.kind is MatchDifferenceKind.INVALID_QUANTITY for item in result.differences)
+    assert all(item.total_invoice_quantity == 10 for item in result.differences)
+
+
+@pytest.mark.parametrize("price", ["NaN", "sNaN", "Infinity", "-Infinity", "-100"])
+def test_nonfinite_invoice_price_produces_recorded_difference(price):
+    invoice = SupplierInvoice(
+        "SUP-1", "INV-1", (SupplierInvoiceLine("PO-1", 1, 10, Decimal(price)),),
+        SupplierInvoiceStatus.ENTERED,
+    )
+    run = EvaluationRun.start(define_task(initial_supplier_invoices=(invoice,)))
+    receive(run)
+    result = match(run).result
+    assert result.accepted and result.invoice_status is SupplierInvoiceStatus.HAS_DIFFERENCES
+    assert result.differences[0].kind is MatchDifferenceKind.INVALID_UNIT_PRICE
+    assert run.execution_trace()[-1].operation == "match"
+
+
+@pytest.mark.parametrize("price", ["NaN", "sNaN", "Infinity", "-100"])
+def test_invalid_order_price_is_a_recorded_difference(price):
+    run = EvaluationRun.start(define_task(order_price=price))
+    receive(run)
+    enter(run)
+    result = match(run).result
+    assert result.invoice_status is SupplierInvoiceStatus.HAS_DIFFERENCES
+    assert result.differences[0].kind is MatchDifferenceKind.INVALID_UNIT_PRICE
+
+
+@pytest.mark.parametrize("price", ["1e1000000", "1e-1000000"])
+def test_extreme_exponent_price_is_compared_without_exponent_sized_precision(price):
+    run = EvaluationRun.start(define_task(invoice_price=price))
+    receive(run)
+    enter(run, price=price)
+    result = match(run).result
+    assert result.invoice_status is SupplierInvoiceStatus.HAS_DIFFERENCES
+    assert result.differences[0].kind is MatchDifferenceKind.UNIT_PRICE
+
+
+def test_differences_preserve_source_line_numbers_when_entered_in_different_order():
+    run = EvaluationRun.start(define_task())
+    receive(run)
+    enter(run, lines=(
+        SupplierInvoiceLine("PO-1", 1, 4, Decimal("103"), invoice_line_no=42),
+        SupplierInvoiceLine("PO-1", 1, 6, Decimal("97"), invoice_line_no=17),
+    ))
+    result = match(run).result
+    assert [item.invoice_line_no for item in result.differences] == [42, 17]
+
+
+def test_tool_key_collision_with_direct_calls_is_recovered_and_retry_is_stable():
+    invoice = SupplierInvoice(
+        "SUP-1", "INV-1", (SupplierInvoiceLine("PO-1", 1, 10, Decimal("100")),),
+        SupplierInvoiceStatus.ENTERED,
+    )
+    run = EvaluationRun.start(define_task(initial_supplier_invoices=(invoice,)))
+    # 模拟另一个工具已占用 ref-1，但它与本次逻辑请求无关。
+    occupied = run.match_supplier_invoice(idempotency_key="ref-1", supplier="SUP-1", invoice_no="missing")
+    assert occupied.rejection is Rejection.UNKNOWN_SUPPLIER_INVOICE
+    first = match(run)
+    retry = match(run)
+    assert first.idempotency_key != "ref-1"
+    assert first.result.accepted
+    assert retry.idempotency_key == first.idempotency_key
+    assert retry.result == replace(first.result, replayed=True)
+    assert any(event.rejection is Rejection.IDEMPOTENCY_KEY_CONFLICT for event in run.execution_trace())
+
+
+def test_concurrent_tool_calls_reuse_one_key_for_the_same_request():
+    run = EvaluationRun.start(define_task())
+    receive(run)
+    enter(run)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: match(run), range(24)))
+    assert len({result.idempotency_key for result in results}) == 1
+    assert all(result.result.accepted for result in results)
+    assert sum(not result.result.replayed for result in results) == 1
+
+
+def test_concurrent_distinct_tool_requests_receive_distinct_keys():
+    run = EvaluationRun.start(define_task())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda i: match(run, request=f"match-{i}", invoice_no=f"INV-{i}"), range(24)))
+    assert len({result.idempotency_key for result in results}) == 24
+    assert all(result.result.rejection is Rejection.UNKNOWN_SUPPLIER_INVOICE for result in results)

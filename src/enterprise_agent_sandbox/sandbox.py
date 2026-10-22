@@ -1,7 +1,7 @@
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from decimal import Context, Decimal, localcontext
+from decimal import Context, Decimal, MAX_EMAX, MIN_EMIN, Overflow, localcontext
 from enum import Enum
 
 
@@ -67,6 +67,8 @@ class MatchDifferenceKind(Enum):
     UNKNOWN_PURCHASE_ORDER = "unknown_purchase_order"
     UNKNOWN_PURCHASE_ORDER_LINE = "unknown_purchase_order_line"
     SUPPLIER_MISMATCH = "supplier_mismatch"
+    INVALID_QUANTITY = "invalid_quantity"
+    INVALID_UNIT_PRICE = "invalid_unit_price"
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class SupplierInvoiceLine:
     po_line_no: int
     quantity: int
     unit_price: Decimal
+    invoice_line_no: int | None = None
 
 
 @dataclass(frozen=True)
@@ -412,19 +415,22 @@ class Sandbox:
 
         quantities: dict[tuple[str, int], int] = defaultdict(int)
         for line in invoice.lines:
-            quantities[(line.purchase_order_no, line.po_line_no)] += line.quantity
+            if line.quantity > 0:
+                quantities[(line.purchase_order_no, line.po_line_no)] += line.quantity
 
         differences = []
         for index, line in enumerate(invoice.lines, start=1):
             key = (line.purchase_order_no, line.po_line_no)
             detail = dict(
-                invoice_line_no=index,
+                invoice_line_no=line.invoice_line_no if line.invoice_line_no is not None else index,
                 purchase_order_no=line.purchase_order_no,
                 po_line_no=line.po_line_no,
                 invoice_quantity=line.quantity,
                 invoice_unit_price=line.unit_price,
                 total_invoice_quantity=quantities[key],
             )
+            if line.quantity <= 0:
+                differences.append(MatchDifference(MatchDifferenceKind.INVALID_QUANTITY, **detail))
             order = self._purchase_orders.get(line.purchase_order_no)
             if order is None:
                 differences.append(MatchDifference(MatchDifferenceKind.UNKNOWN_PURCHASE_ORDER, **detail))
@@ -441,6 +447,9 @@ class Sandbox:
                 differences.append(MatchDifference(MatchDifferenceKind.SUPPLIER_MISMATCH, **detail))
             if quantities[key] > available:
                 differences.append(MatchDifference(MatchDifferenceKind.QUANTITY, **detail))
+            if any(not price.is_finite() or price < 0 for price in (line.unit_price, order_line.unit_price)):
+                differences.append(MatchDifference(MatchDifferenceKind.INVALID_UNIT_PRICE, **detail))
+                continue
             outside_tolerance, relative = _price_difference(line.unit_price, order_line.unit_price)
             if outside_tolerance:
                 differences.append(MatchDifference(
@@ -481,14 +490,14 @@ class Sandbox:
 
 
 def _price_difference(invoice_price: Decimal, order_price: Decimal) -> tuple[bool, Decimal | None]:
-    # 用交叉相乘判定边界，不让相对差的除法舍入影响 2% 判断。
-    # 精度覆盖两输入的小数位跨度，结果不依赖调用方的 Decimal 上下文精度。
-    precision = max(28, len(invoice_price.as_tuple().digits), len(order_price.as_tuple().digits)) + abs(
-        invoice_price.as_tuple().exponent - order_price.as_tuple().exponent
-    ) + 4
-    with localcontext(Context(prec=precision)):
-        delta = abs(invoice_price - order_price)
-        outside_tolerance = delta > abs(order_price) * Decimal("0.02")
+    # 直接比较订单价的 98% 和 102%，乘法精度只由有效数字数决定，
+    # 不随两输入的指数差增长。相对差仅供展示，不参与容差判断。
+    precision = max(28, len(invoice_price.as_tuple().digits), len(order_price.as_tuple().digits)) + 4
+    with localcontext(Context(prec=precision, Emax=MAX_EMAX, Emin=MIN_EMIN)) as context:
+        context.traps[Overflow] = False
+        outside_tolerance = not order_price * Decimal("0.98") <= invoice_price <= order_price * Decimal("1.02")
         # 零价订单的相对差无定义；同为零价无差异，非零发票价保留为单价差异。
-        relative = delta / abs(order_price) if order_price else None
+        relative = (invoice_price / order_price - 1).copy_abs() if order_price else None
+        if relative is not None and not relative.is_finite():
+            relative = None
         return outside_tolerance, relative
