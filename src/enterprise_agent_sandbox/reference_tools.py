@@ -22,6 +22,12 @@ class ReferenceInvoice:
     result: OperationResult
 
 
+@dataclass(frozen=True)
+class ReferenceMatch:
+    idempotency_key: str
+    result: OperationResult
+
+
 class ReferenceToolLayer:
     """参考工具层：把收货和发票工具映射为业务操作，并自行选择幂等键。"""
 
@@ -81,6 +87,19 @@ class ReferenceToolLayer:
 
     def supplier_invoices(self) -> QueryResult:
         return self._sandbox.supplier_invoices(self._identity)
+
+    def match_supplier_invoice(
+        self, *, logical_request_id: str, supplier: str, invoice_no: str
+    ) -> ReferenceMatch:
+        slot = (logical_request_id, ("match", supplier, invoice_no))
+        key = self._logical.get(slot)
+        if key is None:
+            key = self._mint({invoice_no, logical_request_id})
+            self._logical[slot] = key
+        result = self._sandbox.match_supplier_invoice(
+            self._identity, idempotency_key=key, supplier=supplier, invoice_no=invoice_no
+        )
+        return ReferenceMatch(idempotency_key=key, result=result)
 
     def payables(self) -> QueryResult:
         return self._sandbox.payables(self._identity)
